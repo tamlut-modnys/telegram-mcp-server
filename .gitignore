@@ -1,0 +1,10 @@
+.DS_Store
+.venv/
+venv/
+__pycache__/
+*.pyc
+config.json
+session.session
+session.session-journal
+launchd.out.log
+launchd.err.log
