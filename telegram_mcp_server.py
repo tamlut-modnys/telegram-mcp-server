@@ -12,6 +12,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 from telethon import TelegramClient
+from telethon.sessions import SQLiteSession, StringSession
 from telethon.tl.types import (
     Channel,
     Chat,
@@ -26,7 +27,15 @@ from telethon.tl.types import (
 
 CONFIG_DIR = Path.home() / ".telegram-mcp"
 CONFIG_FILE = CONFIG_DIR / "config.json"
-SESSION_PATH = str(CONFIG_DIR / "session")
+SESSION_BASE_PATH = Path(
+    os.environ.get("TELEGRAM_SESSION_PATH", str(CONFIG_DIR / "session"))
+)
+if SESSION_BASE_PATH.suffix == ".session":
+    SESSION_BASE_PATH = SESSION_BASE_PATH.with_suffix("")
+SESSION_FILE = SESSION_BASE_PATH.with_suffix(".session")
+STRING_SESSION_FILE = Path(
+    os.environ.get("TELEGRAM_STRING_SESSION_FILE", str(CONFIG_DIR / "session.string"))
+)
 
 
 def _load_config() -> dict:
@@ -39,7 +48,42 @@ def _load_config() -> dict:
         "api_id": config.get("api_id") or os.environ.get("TELEGRAM_API_ID", ""),
         "api_hash": config.get("api_hash") or os.environ.get("TELEGRAM_API_HASH", ""),
         "phone": config.get("phone") or os.environ.get("TELEGRAM_PHONE", ""),
+        "string_session": config.get("string_session")
+        or os.environ.get("TELEGRAM_STRING_SESSION", ""),
     }
+
+
+def _write_secret_file(path: Path, value: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(value, encoding="utf-8")
+    os.chmod(path, 0o600)
+
+
+def _load_string_session(cfg: dict) -> str:
+    value = str(cfg.get("string_session") or "").strip()
+    if value:
+        return value
+
+    if STRING_SESSION_FILE.exists():
+        return STRING_SESSION_FILE.read_text(encoding="utf-8").strip()
+
+    return ""
+
+
+def _migrate_sqlite_session() -> str:
+    if not SESSION_FILE.exists():
+        return ""
+
+    session = SQLiteSession(str(SESSION_BASE_PATH))
+    try:
+        value = StringSession.save(session).strip()
+    finally:
+        session.close()
+
+    if value:
+        _write_secret_file(STRING_SESSION_FILE, value)
+
+    return value
 
 
 _client: TelegramClient | None = None
@@ -57,13 +101,21 @@ async def _get_client() -> TelegramClient:
         )
 
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    client = TelegramClient(SESSION_PATH, int(cfg["api_id"]), cfg["api_hash"])
+    session_string = _load_string_session(cfg)
+    if not session_string:
+        session_string = _migrate_sqlite_session()
+
+    session = StringSession(session_string) if session_string else str(SESSION_BASE_PATH)
+    client = TelegramClient(session, int(cfg["api_id"]), cfg["api_hash"])
     await client.connect()
 
     if not await client.is_user_authorized():
         raise RuntimeError(
             "Not logged in. Run ~/.telegram-mcp/telegram_login.py first."
         )
+
+    if session_string and not STRING_SESSION_FILE.exists():
+        _write_secret_file(STRING_SESSION_FILE, session_string)
 
     _client = client
     return client

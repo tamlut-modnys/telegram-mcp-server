@@ -71,7 +71,10 @@ If you are using the repo-local virtualenv instead:
 ```
 
 Telegram will prompt for your login code and any 2FA password. On success it
-stores the session at `~/.telegram-mcp/session.session`.
+stores the session at `~/.telegram-mcp/session.session` and also exports a
+lock-free runtime session to `~/.telegram-mcp/session.string`. The MCP server
+prefers the string session so Claude, Codex, and automations can use Telegram
+at the same time without SQLite lock errors.
 
 ## Connect it to Claude Cowork
 
@@ -146,6 +149,12 @@ If Claude does not show the tools:
 - Confirm your config file or environment variables contain `api_id` and
   `api_hash`
 
+If you see `database is locked`:
+
+- Re-run `telegram_login.py` to refresh `~/.telegram-mcp/session.string`
+- Restart Claude Desktop or open a fresh Codex session so new MCP processes use
+  the string session
+
 If authentication fails:
 
 - Make sure your phone number includes the country code
@@ -157,4 +166,5 @@ Do not commit:
 
 - `~/.telegram-mcp/config.json`
 - `~/.telegram-mcp/session.session`
+- `~/.telegram-mcp/session.string`
 - any exported logs containing message content
