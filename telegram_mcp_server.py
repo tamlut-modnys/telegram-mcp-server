@@ -7,7 +7,9 @@ also run over SSE by setting TELEGRAM_MCP_TRANSPORT=sse.
 """
 
 import json
+import mimetypes
 import os
+import re
 from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
@@ -35,6 +37,12 @@ if SESSION_BASE_PATH.suffix == ".session":
 SESSION_FILE = SESSION_BASE_PATH.with_suffix(".session")
 STRING_SESSION_FILE = Path(
     os.environ.get("TELEGRAM_STRING_SESSION_FILE", str(CONFIG_DIR / "session.string"))
+)
+MEDIA_DIR = Path(
+    os.environ.get("TELEGRAM_MEDIA_DIR", str(CONFIG_DIR / "downloads"))
+)
+MAX_DOWNLOAD_BYTES = int(
+    os.environ.get("TELEGRAM_MAX_DOWNLOAD_BYTES", str(25 * 1024 * 1024))
 )
 
 
@@ -132,38 +140,167 @@ def _entity_name(entity) -> str:
     return str(getattr(entity, "id", "unknown"))
 
 
-def _media_text(message) -> str:
+def _document_file_name(message) -> str:
+    document = getattr(message.media, "document", None)
+    if not document:
+        return ""
+
+    for attribute in document.attributes:
+        name = getattr(attribute, "file_name", None)
+        if name:
+            return str(name)
+
+    return ""
+
+
+def _media_kind(message) -> str:
     if message.media is None:
         return ""
     if isinstance(message.media, MessageMediaPhoto):
-        return "[Photo]"
+        return "photo"
     if isinstance(message.media, MessageMediaDocument):
         document = message.media.document
         if document:
-            for attribute in document.attributes:
-                name = getattr(attribute, "file_name", None)
-                if name:
-                    return f"[Document: {name}]"
-            if document.mime_type and "video" in document.mime_type:
-                return "[Video]"
-            if document.mime_type and "audio" in document.mime_type:
-                return "[Audio]"
-            if document.mime_type and "image/gif" in document.mime_type:
-                return "[GIF]"
-        return "[Document]"
+            mime_type = str(document.mime_type or "").lower()
+            if "video" in mime_type:
+                return "video"
+            if "audio" in mime_type:
+                return "audio"
+            if mime_type == "image/gif":
+                return "gif"
+            if mime_type.startswith("image/"):
+                return "image"
+        return "document"
     if isinstance(message.media, MessageMediaGeo):
-        return "[Location]"
+        return "location"
     if isinstance(message.media, MessageMediaContact):
+        return "contact"
+    if isinstance(message.media, MessageMediaPoll):
+        return "poll"
+    if isinstance(message.media, MessageMediaWebPage):
+        return ""
+    return "media"
+
+
+def _media_info(message) -> dict | None:
+    kind = _media_kind(message)
+    if not kind:
+        return None
+
+    info: dict[str, object] = {
+        "type": kind,
+        "downloadable": kind in {"photo", "image", "gif", "video", "audio", "document"},
+    }
+
+    file_info = getattr(message, "file", None)
+    file_name = _document_file_name(message)
+    mime_type = str(getattr(file_info, "mime_type", "") or "")
+    size = getattr(file_info, "size", None)
+
+    if file_name:
+        info["file_name"] = file_name
+    if mime_type:
+        info["mime_type"] = mime_type
+    if size is not None:
+        info["size_bytes"] = int(size)
+
+    width = getattr(file_info, "width", None)
+    height = getattr(file_info, "height", None)
+    duration = getattr(file_info, "duration", None)
+    if width is not None:
+        info["width"] = int(width)
+    if height is not None:
+        info["height"] = int(height)
+    if duration is not None:
+        info["duration_seconds"] = int(duration)
+
+    if kind == "location":
+        geo = getattr(message.media, "geo", None)
+        if geo:
+            info["latitude"] = geo.lat
+            info["longitude"] = geo.long
+    elif kind == "contact":
+        info["first_name"] = message.media.first_name or ""
+        info["last_name"] = message.media.last_name or ""
+        if getattr(message.media, "phone_number", None):
+            info["phone_number"] = message.media.phone_number
+    elif kind == "poll":
+        question = message.media.poll.question
+        info["question"] = (
+            question.text if hasattr(question, "text") else str(question)
+        )
+
+    return info
+
+
+def _media_text(message) -> str:
+    info = _media_info(message)
+    if info is None:
+        return ""
+
+    kind = str(info["type"])
+    if kind == "photo":
+        return "[Photo]"
+    if kind == "video":
+        return "[Video]"
+    if kind == "audio":
+        return "[Audio]"
+    if kind == "gif":
+        return "[GIF]"
+    if kind in {"document", "image"}:
+        file_name = str(info.get("file_name") or "").strip()
+        if file_name:
+            return f"[Document: {file_name}]"
+        return "[Document]"
+    if kind == "location":
+        return "[Location]"
+    if kind == "contact":
         return (
             f"[Contact: {message.media.first_name} {message.media.last_name}]"
         ).strip()
-    if isinstance(message.media, MessageMediaPoll):
-        question = message.media.poll.question
-        text = question.text if hasattr(question, "text") else str(question)
-        return f"[Poll: {text}]"
-    if isinstance(message.media, MessageMediaWebPage):
-        return ""
+    if kind == "poll":
+        return f"[Poll: {info.get('question', '')}]".rstrip()
     return "[Media]"
+
+
+def _safe_file_name(name: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._")
+    return cleaned or "attachment"
+
+
+def _guess_extension(media_info: dict | None) -> str:
+    if not media_info:
+        return ""
+
+    file_name = str(media_info.get("file_name") or "")
+    if file_name:
+        return Path(file_name).suffix
+
+    mime_type = str(media_info.get("mime_type") or "")
+    guessed = mimetypes.guess_extension(mime_type)
+    if guessed:
+        return guessed
+
+    kind = str(media_info.get("type") or "")
+    if kind == "photo":
+        return ".jpg"
+    if kind == "gif":
+        return ".gif"
+    return ""
+
+
+def _download_target_path(message, media_info: dict | None) -> Path:
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    chat_dir = MEDIA_DIR / f"chat_{message.chat_id}"
+    chat_dir.mkdir(parents=True, exist_ok=True)
+
+    file_name = str((media_info or {}).get("file_name") or "").strip()
+    extension = _guess_extension(media_info)
+    if file_name:
+        base_name = _safe_file_name(Path(file_name).name)
+        return chat_dir / f"message_{message.id}_{base_name}"
+
+    return chat_dir / f"message_{message.id}{extension}"
 
 
 def _message_to_dict(message, chat_title: str = "") -> dict:
@@ -173,6 +310,7 @@ def _message_to_dict(message, chat_title: str = "") -> dict:
 
     text = message.text or ""
     media = _media_text(message)
+    media_info = _media_info(message)
     if media and text:
         text = f"{media} {text}"
     elif media:
@@ -185,6 +323,9 @@ def _message_to_dict(message, chat_title: str = "") -> dict:
         "date": message.date.isoformat() if message.date else "",
         "sender": sender_name,
         "text": text,
+        "caption": message.text or "",
+        "has_media": media_info is not None,
+        "media": media_info,
         "reply_to_msg_id": (
             message.reply_to.reply_to_msg_id if message.reply_to else None
         ),
@@ -259,6 +400,54 @@ async def search_chats(query: str, limit: int = 10) -> str:
             if len(results) >= limit:
                 break
     return json.dumps(results, ensure_ascii=False, indent=2)
+
+
+@mcp.tool()
+async def download_media(chat_id: int, message_id: int) -> str:
+    """Download a message attachment to a local file and return its path."""
+    client = await _get_client()
+    entity = await client.get_entity(chat_id)
+    message = await client.get_messages(entity, ids=message_id)
+
+    if isinstance(message, list):
+        message = message[0] if message else None
+
+    if message is None:
+        raise RuntimeError(
+            f"Message {message_id} was not found in chat {chat_id}."
+        )
+
+    media_info = _media_info(message)
+    if media_info is None or not media_info.get("downloadable"):
+        raise RuntimeError(
+            f"Message {message_id} does not contain downloadable media."
+        )
+
+    size_bytes = media_info.get("size_bytes")
+    if isinstance(size_bytes, int) and size_bytes > MAX_DOWNLOAD_BYTES:
+        raise RuntimeError(
+            f"Message {message_id} media is {size_bytes} bytes, above the "
+            f"configured limit of {MAX_DOWNLOAD_BYTES} bytes."
+        )
+
+    target_path = _download_target_path(message, media_info)
+    downloaded = await client.download_media(message, file=str(target_path))
+    if not downloaded:
+        raise RuntimeError(f"Failed to download media for message {message_id}.")
+
+    downloaded_path = Path(downloaded).resolve()
+    return json.dumps(
+        {
+            "status": "downloaded",
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "path": str(downloaded_path),
+            "caption": message.text or "",
+            "media": media_info,
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
 
 
 @mcp.tool()

@@ -11,9 +11,10 @@ to Claude Desktop and Cowork.
 - List recent chats and unread counts
 - Look up chat metadata
 - Search chats by name
-- Read recent messages
+- Read recent messages with structured media metadata
 - Send a message or reply
 - Search messages globally or inside a chat
+- Download photo and document attachments to a local file
 - List contacts
 - Mark chats as read
 
@@ -55,6 +56,8 @@ You can also provide the same values through environment variables:
 - `TELEGRAM_API_ID`
 - `TELEGRAM_API_HASH`
 - `TELEGRAM_PHONE`
+- `TELEGRAM_MEDIA_DIR`: optional override for where downloaded media is stored
+- `TELEGRAM_MAX_DOWNLOAD_BYTES`: optional max attachment size to download
 
 ## One-time login
 
@@ -120,10 +123,23 @@ startup.
 - `get_chat_info(chat_id)`
 - `search_chats(query, limit=10)`
 - `read_messages(chat_id, limit=20)`
+- `download_media(chat_id, message_id)`
 - `send_message(chat_id, text, reply_to_message_id=0)`
 - `search_messages(query, chat_id=0, limit=20, sender_name="")`
 - `get_contacts(limit=50)`
 - `mark_as_read(chat_id)`
+
+`read_messages` and `search_messages` now preserve the existing `text` field for
+compatibility, and also return:
+
+- `caption`: the raw Telegram caption/text without a media placeholder prefix
+- `has_media`: whether the message contains media
+- `media`: structured metadata such as `type`, `downloadable`, `mime_type`,
+  `file_name`, `size_bytes`, and image/video dimensions when available
+
+`download_media` saves the attachment to an absolute local path and returns the
+saved path plus the same media metadata. By default files are stored under
+`~/.telegram-mcp/downloads`.
 
 ## Optional SSE debugging mode
 
